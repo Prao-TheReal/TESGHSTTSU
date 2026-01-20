@@ -9,6 +9,7 @@
 #include "imgui.h"
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx12.h"
+#include <atomic> // [FIX] Correct include syntax
 
 // Player position - POINTER CHAIN
 uintptr_t g_GameBase = 0;
@@ -22,13 +23,23 @@ struct ItemData {
     uintptr_t address;
 };
 
+// [FIX] Added SafeRead helper function back
+bool SafeRead(uintptr_t addr, void* dest, size_t size) {
+    __try {
+        memcpy(dest, (void*)addr, size);
+        return true;
+    }
+    __except (1) {
+        return false;
+    }
+}
+
 Vector3 GetPlayerPosition() {
     Vector3 pos = { 0, 0, 0 };
 
     // Get game base address dynamically
     if (g_GameBase == 0) {
         g_GameBase = (uintptr_t)GetModuleHandleA("GhostOfTsushima.exe");
-        printf("[GoTCheat] Game base address: 0x%llX\n", g_GameBase);
     }
 
     __try {
@@ -134,6 +145,7 @@ bool g_ShowSupplyESP = false;  // Supply Bundle ESP toggle
 float g_FOVMultiplier = 1.0f;  // FOV adjustment slider
 float g_DetectionRange = 1000.0f;  // Detection range in meters
 bool g_ShowW2SDebug = false;   // WorldToScreen debug output
+std::atomic<bool> g_Unload = false; // [FIX] Atomic is now valid
 
 // Dummy bools for disabled "Coming Soon" checkboxes
 bool g_DummyEnemyESP = false;
@@ -158,7 +170,6 @@ WNDPROC oWndProc = nullptr;
 LRESULT CALLBACK hkWndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-        printf("[GoTCheat] Menu toggled: %s\n", g_ShowMenu ? "ON" : "OFF");
     }
 
     if (g_ShowMenu) {
@@ -174,6 +185,7 @@ void RenderMenu() {
 
     ImGui::SetNextWindowSize(ImVec2(450, 400), ImGuiCond_FirstUseEver);
     ImGui::Begin("Ghost of Tsushima - Scan ESP", &g_ShowMenu);
+    ImGui::TextColored(ImVec4(1, 0, 0, 1), "Press END to Eject");
 
     ImGui::TextColored(ImVec4(0, 1, 0, 1), "Press INSERT to toggle menu");
     ImGui::Separator();
@@ -219,338 +231,164 @@ void RenderMenu() {
     ImGui::End();
 }
 
+void DumpMemory(uintptr_t address, int size) {
+    printf("\n[MEMORY DUMP] Address: 0x%llX\n", address);
+    for (int i = 0; i < size; i += 16) {
+        printf("%04X: ", i);
+        for (int j = 0; j < 16; j++) {
+            if (i + j < size) {
+                // Print hex
+                printf("%02X ", *(unsigned char*)(address + i + j));
+            }
+            else {
+                printf("   ");
+            }
+        }
+        printf(" | ");
+        for (int j = 0; j < 16; j++) {
+            if (i + j < size) {
+                // Print ASCII representation if printable
+                unsigned char c = *(unsigned char*)(address + i + j);
+                printf("%c", (c >= 32 && c <= 126) ? c : '.');
+            }
+        }
+        printf("\n");
+    }
+    printf("--------------------------------------------------\n");
+}
+
 void RenderESP() {
     ImGuiIO& io = ImGui::GetIO();
 
     if (g_ShowPlayerInfo) {
         ImGui::SetNextWindowPos(ImVec2(10, 10));
         ImGui::SetNextWindowBgAlpha(0.8f);
-        ImGui::Begin("##PlayerInfo", nullptr,
-            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoSavedSettings);
-
+        ImGui::Begin("##PlayerInfo", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize);
         Vector3 pos = GetPlayerPosition();
         ImGui::TextColored(ImVec4(0, 1, 0, 1), "=== PLAYER ===");
-        ImGui::Text("X: %.2f", pos.x);
-        ImGui::Text("Y: %.2f", pos.y);
-        ImGui::Text("Z: %.2f", pos.z);
-
-        // Show view matrix when debug is enabled
-        if (g_ShowW2SDebug) {
-            ImGui::Separator();
-            ImGui::TextColored(ImVec4(1, 1, 0, 1), "=== VIEW MATRIX ===");
-
-            // Read the matrix
-            static uintptr_t viewMatrixAddr = g_GameBase + 0x3487540;
-            float matrix[16] = { 0 };
-            __try {
-                for (int i = 0; i < 16; i++) {
-                    matrix[i] = *(float*)(viewMatrixAddr + (i * 4));
-                }
-
-                ImGui::Text("[0-3]:   [%.2f, %.2f, %.2f, %.2f]", matrix[0], matrix[1], matrix[2], matrix[3]);
-                ImGui::Text("[4-7]:   [%.2f, %.2f, %.2f, %.2f]", matrix[4], matrix[5], matrix[6], matrix[7]);
-                ImGui::Text("[8-11]:  [%.2f, %.2f, %.2f, %.2f]", matrix[8], matrix[9], matrix[10], matrix[11]);
-                ImGui::Text("[12-15]: [%.2f, %.2f, %.2f, %.2f]", matrix[12], matrix[13], matrix[14], matrix[15]);
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                ImGui::TextColored(ImVec4(1, 0, 0, 1), "Failed to read matrix!");
-            }
-        }
-
+        ImGui::Text("Pos: %.1f, %.1f, %.1f", pos.x, pos.y, pos.z);
         ImGui::End();
     }
 
-    if (g_ShowRadar) {
-        ImGui::SetNextWindowPos(ImVec2(io.DisplaySize.x - 170, io.DisplaySize.y - 170));
-        ImGui::SetNextWindowSize(ImVec2(160, 160));
-        ImGui::SetNextWindowBgAlpha(0.8f);
-        ImGui::Begin("##Radar", nullptr,
-            ImGuiWindowFlags_NoTitleBar |
-            ImGuiWindowFlags_NoResize |
-            ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoSavedSettings);
-
-        ImDrawList* draw = ImGui::GetWindowDrawList();
-        ImVec2 p = ImGui::GetCursorScreenPos();
-        float radius = 60.0f;
-        ImVec2 center(p.x + 80, p.y + 80);
-
-        // Radar circle
-        draw->AddCircle(center, radius, IM_COL32(0, 255, 0, 255), 32, 2.0f);
-
-        // Crosshair
-        draw->AddLine(ImVec2(center.x - 10, center.y), ImVec2(center.x + 10, center.y), IM_COL32(0, 255, 0, 255));
-        draw->AddLine(ImVec2(center.x, center.y - 10), ImVec2(center.x, center.y + 10), IM_COL32(0, 255, 0, 255));
-
-        // Player dot
-        draw->AddCircleFilled(center, 4.0f, IM_COL32(255, 0, 0, 255));
-
-        ImGui::SetCursorPos(ImVec2(10, 10));
-        ImGui::TextColored(ImVec4(1, 1, 1, 1), "RADAR");
-
-        ImGui::End();
-    }
-
-    // ===== SCAN-BASED SUPPLY ESP =====
     if (g_ShowSupplyESP) {
         Vector3 playerPos = GetPlayerPosition();
         ImDrawList* draw = ImGui::GetBackgroundDrawList();
 
         static std::vector<ItemData> scannedItems;
         static DWORD lastScanTime = 0;
-        static bool debugPrinted = false;
         DWORD currentTime = GetTickCount();
 
-        // Scan every 1 second
-        if (currentTime - lastScanTime > 1000) {
+        // Scan every 200ms
+        if (currentTime - lastScanTime > 200) {
             lastScanTime = currentTime;
             scannedItems.clear();
 
-            // Debug output (first scan only)
-            if (!debugPrinted) {
-                printf("\n[SCAN DEBUG] Starting item scan...\n");
-                printf("[SCAN DEBUG] Player position: [%.2f, %.2f, %.2f]\n",
-                    playerPos.x, playerPos.y, playerPos.z);
-            }
+            uintptr_t chainBases[] = { g_GameBase + 0x033B4E18, g_GameBase + 0x033B4E30 };
 
-            // USER'S FINAL DISCOVERY - Multi-level pointer chain to loot array!
-            __try {
-                // Follow the complete pointer chain (REVERSED ORDER!):
-                // Base → +718 → +38 → +B8 → +A0 → Items with 0x180 stride
-
-                uintptr_t ptr1 = *(uintptr_t*)(g_GameBase + 0x033B4E18);
-                if (!ptr1 || ptr1 < 0x10000) {
-                    if (!debugPrinted) {
-                        printf("\n[ITEM ARRAY] ERROR: First pointer is NULL!\n");
-                        debugPrinted = true;
-                    }
-                }
-                else {
-                    uintptr_t ptr2 = *(uintptr_t*)(ptr1 + 0x718);
-                    if (!ptr2 || ptr2 < 0x10000) {
-                        if (!debugPrinted) {
-                            printf("\n[ITEM ARRAY] ERROR: Second pointer is NULL!\n");
-                            debugPrinted = true;
-                        }
-                    }
-                    else {
-                        uintptr_t ptr3 = *(uintptr_t*)(ptr2 + 0x38);
-                        if (!ptr3 || ptr3 < 0x10000) {
-                            if (!debugPrinted) {
-                                printf("\n[ITEM ARRAY] ERROR: Third pointer is NULL!\n");
-                                debugPrinted = true;
-                            }
-                        }
-                        else {
-                            uintptr_t ptr4 = *(uintptr_t*)(ptr3 + 0xB8);
-                            if (!ptr4 || ptr4 < 0x10000) {
-                                if (!debugPrinted) {
-                                    printf("\n[ITEM ARRAY] ERROR: Fourth pointer is NULL!\n");
-                                    debugPrinted = true;
-                                }
-                            }
-                            else {
-                                uintptr_t firstItemAddr = ptr4 + 0xA0;  // A0 gives X, Y, Z (not A8 which gives Z first!)
-
-                                if (!debugPrinted) {
-                                    printf("\n[ITEM ARRAY] Following 4-level pointer chain!\n");
-                                    printf("[ITEM ARRAY] Base: 0x%llX\n", g_GameBase + 0x033B4E18);
-                                    printf("[ITEM ARRAY] Ptr1: 0x%llX (base)\n", ptr1);
-                                    printf("[ITEM ARRAY] Ptr2: 0x%llX (ptr1 + 718)\n", ptr2);
-                                    printf("[ITEM ARRAY] Ptr3: 0x%llX (ptr2 + 38)\n", ptr3);
-                                    printf("[ITEM ARRAY] Ptr4: 0x%llX (ptr3 + B8)\n", ptr4);
-                                    printf("[ITEM ARRAY] Items: 0x%llX (ptr4 + A0)\n", firstItemAddr);
-                                }
-
-                                int validPointers = 0;
-                                int itemsAdded = 0;
-
-                                // Scan up to 500 items with 0x180 stride
-                                for (int i = 0; i < 500; i++) {
-                                    uintptr_t itemAddr = firstItemAddr + (i * 0x180);
-
-                                    Vector3 pos = { 0, 0, 0 };
-
-                                    __try {
-                                        // Coordinates at: item+0 (X), item+4 (Y), item+8 (Z)
-                                        pos.x = *(float*)(itemAddr);
-                                        pos.y = *(float*)(itemAddr + 4);
-                                        pos.z = *(float*)(itemAddr + 8);
-                                    }
-                                    __except (EXCEPTION_EXECUTE_HANDLER) {
-                                        continue; // Can't read, skip
-                                    }
-
-                                    // Debug first 5 items
-                                    if (!debugPrinted && i < 5) {
-                                        printf("  [Item %d] at 0x%llX: [%.2f, %.2f, %.2f]\n",
-                                            i, itemAddr, pos.x, pos.y, pos.z);
-                                    }
-
-                                    validPointers++;
-
-                                    // Validate coordinates
-                                    if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
-                                    if (isnan(pos.x) || isnan(pos.y) || isnan(pos.z)) continue;
-                                    if (fabs(pos.x) > 500000 || fabs(pos.y) > 500000 || fabs(pos.z) > 500000) continue;
-
-                                    float distance = Distance3D(playerPos, pos);
-                                    if (distance < 5.0f) continue;  // Too close (probably player)
-                                    if (distance > g_DetectionRange) continue;  // Use slider value
-
-                                    // Check for duplicates
-                                    bool isDuplicate = false;
-                                    for (const ItemData& existing : scannedItems) {
-                                        if (Distance3D(pos, existing.position) < 1.0f) {
-                                            isDuplicate = true;
-                                            break;
-                                        }
-                                    }
-
-                                    if (!isDuplicate) {
-                                        ItemData item;
-                                        item.position = pos;
-                                        item.address = itemAddr;
-                                        scannedItems.push_back(item);
-                                        itemsAdded++;
-
-                                        if (!debugPrinted && itemsAdded <= 10) {
-                                            printf("  [LOOT FOUND] #%d: [%.0f, %.0f, %.0f] dist=%.0fm\n",
-                                                itemsAdded, pos.x, pos.y, pos.z, distance);
-                                        }
-                                    }
-                                }
-
-                                if (!debugPrinted) {
-                                    printf("\n[ITEM ARRAY] Scan complete:\n");
-                                    printf("  Items scanned: %d / 500\n", validPointers);
-                                    printf("  Items in range (%.0fm): %d\n", g_DetectionRange, itemsAdded);
-                                    printf("  Final item count: %d\n", (int)scannedItems.size());
-                                    debugPrinted = true;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // SECOND POINTER CHAIN - Additional items
-                // Base: +033B4E30 → +0 → +38 → +B8 → +A0 (reading CE bottom to top)
+            for (uintptr_t baseAddr : chainBases) {
                 __try {
-                    uintptr_t ptr1_2 = *(uintptr_t*)(g_GameBase + 0x033B4E30);
-                    if (ptr1_2 && ptr1_2 >= 0x10000) {
-                        uintptr_t ptr2_2 = *(uintptr_t*)(ptr1_2 + 0x0);  // Read pointer at +0
-                        if (ptr2_2 && ptr2_2 >= 0x10000) {
-                            uintptr_t ptr3_2 = *(uintptr_t*)(ptr2_2 + 0x38);  // Read pointer at +38
-                            if (ptr3_2 && ptr3_2 >= 0x10000) {
-                                uintptr_t ptr4_2 = *(uintptr_t*)(ptr3_2 + 0xB8);  // Read pointer at +B8
-                                if (ptr4_2 && ptr4_2 >= 0x10000) {
-                                    uintptr_t firstItemAddr2 = ptr4_2 + 0xA0;  // Final offset +A0 (X coords)
+                    uintptr_t ptr1 = *(uintptr_t*)(baseAddr);
+                    if (!ptr1) continue;
+                    uintptr_t ptr2 = (baseAddr == chainBases[0]) ? *(uintptr_t*)(ptr1 + 0x718) : *(uintptr_t*)(ptr1 + 0x0);
+                    if (!ptr2) continue;
+                    uintptr_t ptr3 = *(uintptr_t*)(ptr2 + 0x38);
+                    if (!ptr3) continue;
+                    uintptr_t ptr4 = *(uintptr_t*)(ptr3 + 0xB8);
+                    if (!ptr4) continue;
+                    uintptr_t firstItemAddr = ptr4 + 0xA0;
 
-                                    // Scan second array
-                                    for (int i = 0; i < 500; i++) {
-                                        uintptr_t itemAddr = firstItemAddr2 + (i * 0x180);
+                    for (int i = 0; i < 200; i++) {
+                        uintptr_t itemAddr = firstItemAddr + (i * 0x180);
+                        Vector3 pos = { 0, 0, 0 };
+                        if (!SafeRead(itemAddr, &pos, sizeof(Vector3))) continue;
 
-                                        Vector3 pos = { 0, 0, 0 };
-                                        __try {
-                                            pos.x = *(float*)(itemAddr);
-                                            pos.y = *(float*)(itemAddr + 4);
-                                            pos.z = *(float*)(itemAddr + 8);
-                                        }
-                                        __except (EXCEPTION_EXECUTE_HANDLER) {
-                                            continue;
-                                        }
+                        if (pos.x == 0 || isnan(pos.x) || fabs(pos.x) > 500000) continue;
+                        float dist = Distance3D(playerPos, pos);
+                        if (dist < 2.0f || dist > g_DetectionRange) continue;
 
-                                        // Validate
-                                        if (pos.x == 0 && pos.y == 0 && pos.z == 0) continue;
-                                        if (isnan(pos.x) || isnan(pos.y) || isnan(pos.z)) continue;
-                                        if (fabs(pos.x) > 500000 || fabs(pos.y) > 500000 || fabs(pos.z) > 500000) continue;
-
-                                        float distance = Distance3D(playerPos, pos);
-                                        if (distance < 5.0f) continue;
-                                        if (distance > g_DetectionRange) continue;
-
-                                        // Check duplicates
-                                        bool isDuplicate = false;
-                                        for (const ItemData& existing : scannedItems) {
-                                            if (Distance3D(pos, existing.position) < 1.0f) {
-                                                isDuplicate = true;
-                                                break;
-                                            }
-                                        }
-
-                                        if (!isDuplicate) {
-                                            ItemData item;
-                                            item.position = pos;
-                                            item.address = itemAddr;
-                                            scannedItems.push_back(item);
-                                        }
-                                    }
-                                }
+                        bool isDuplicate = false;
+                        for (const ItemData& existing : scannedItems) {
+                            if (Distance3D(pos, existing.position) < 1.0f) {
+                                isDuplicate = true;
+                                break;
                             }
+                        }
+                        if (!isDuplicate) {
+                            ItemData item;
+                            item.position = pos;
+                            item.address = itemAddr;
+                            scannedItems.push_back(item);
                         }
                     }
                 }
-                __except (EXCEPTION_EXECUTE_HANDLER) {
-                    // Silent fail for second chain
-                }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                if (!debugPrinted) {
-                    printf("[ITEM ARRAY] EXCEPTION during scan!\n");
-                    debugPrinted = true;
-                }
+                __except (1) { continue; }
             }
         }
 
-        // Display scanned items
+        // Render Loop
         int itemCount = 0;
         for (const ItemData& item : scannedItems) {
             float distance = Distance3D(playerPos, item.position);
-
-            // List items in text (max 12 on screen)
-            if (itemCount < 12) {
-                char itemText[256];
-                sprintf_s(itemText, "Item %d: %.0fm [%.0f, %.0f, %.0f] @ 0x%llX",
-                    itemCount + 1, distance, item.position.x, item.position.y, item.position.z, item.address);
-                draw->AddText(ImVec2(10, 200 + itemCount * 15), IM_COL32(0, 255, 0, 255), itemText);
-            }
-
-            // Draw ESP markers for items within detection range
             if (distance <= g_DetectionRange) {
                 Vector2 screenPos;
-                bool onScreen = WorldToScreen(item.position, playerPos, screenPos, io.DisplaySize.x, io.DisplaySize.y);
+                if (WorldToScreen(item.position, playerPos, screenPos, io.DisplaySize.x, io.DisplaySize.y)) {
 
-                if (onScreen) {
-                    // Yellow circle
-                    draw->AddCircleFilled(ImVec2(screenPos.x, screenPos.y), 8.0f, IM_COL32(255, 255, 0, 200));
-                    draw->AddCircle(ImVec2(screenPos.x, screenPos.y), 8.0f, IM_COL32(0, 0, 0, 255), 12, 2.0f);
+                    // --- DATA READER ---
+                    uintptr_t defPtr = 0;
+                    unsigned int fp = 0;
 
-                    // Distance text
-                    char text[64];
-                    sprintf_s(text, "%.0fm", distance);
-                    draw->AddText(ImVec2(screenPos.x + 12, screenPos.y - 8), IM_COL32(255, 255, 255, 255), text);
+                    // Candidate IDs to distinguish Bamboo vs Yew
+                    int d1 = 0; // Offset 0x10
+                    int d2 = 0; // Offset 0x28 (Common for IDs)
+                    int d3 = 0; // Offset 0x90 (Deep data)
+
+                    if (SafeRead(item.address + 0x40, &defPtr, sizeof(uintptr_t))) {
+                        SafeRead(defPtr, &fp, sizeof(unsigned int));
+
+                        // === JUNK FILTER ===
+                        // If it's not Supplies (A7D07D10) OR Harvest (A79C8B40), SKIP IT!
+                        // Note: We check variations due to potential memory noise, but exact match is best.
+                        if (fp != 0xA7D07D10 && fp != 0xA79C8B40) continue;
+                        // ===================
+
+                        // Read deep data to find difference between Bamboo/Yew
+                        SafeRead(defPtr + 0x10, &d1, sizeof(int));
+                        SafeRead(defPtr + 0x28, &d2, sizeof(int));
+                        SafeRead(defPtr + 0x90, &d3, sizeof(int));
+                    }
+                    else {
+                        continue; // No definition = junk
+                    }
+
+                    // Colors
+                    ImU32 color = IM_COL32(255, 255, 255, 255);
+                    if (fp == 0xA7D07D10) color = IM_COL32(0, 255, 255, 255); // Cyan (Supplies)
+                    if (fp == 0xA79C8B40) color = IM_COL32(0, 255, 0, 255);   // Green (Harvest)
+
+                    draw->AddCircleFilled(ImVec2(screenPos.x, screenPos.y), 6.0f, color);
+                    draw->AddCircle(ImVec2(screenPos.x, screenPos.y), 7.0f, IM_COL32(0, 0, 0, 255), 6, 2.0f); // Black outline
+
+                    // Display Data
+                    char text[128];
+                    sprintf_s(text, "D1:%d\nD2:%d\nD3:%d", d1, d2, d3);
+
+                    // Label
+                    char label[32] = "Unknown";
+                    if (fp == 0xA7D07D10) sprintf_s(label, "LOOT");
+                    if (fp == 0xA79C8B40) sprintf_s(label, "HARVEST");
+
+                    draw->AddText(ImVec2(screenPos.x + 12, screenPos.y - 20), color, label);
+                    draw->AddText(ImVec2(screenPos.x + 12, screenPos.y - 5), IM_COL32(200, 200, 200, 255), text);
                 }
             }
-
             itemCount++;
         }
 
-        // Show status at top
         char statusText[256];
-        sprintf_s(statusText, "Scan ESP: %d items found | Scan range: %.0fm | Player: [%.0f, %.0f, %.0f]",
-            (int)scannedItems.size(), g_DetectionRange, playerPos.x, playerPos.y, playerPos.z);
+        sprintf_s(statusText, "Filtered Items: %d", itemCount);
         draw->AddText(ImVec2(10, 180), IM_COL32(0, 255, 255, 255), statusText);
-
-        // If no items found, show help message
-        if (scannedItems.size() == 0) {
-            draw->AddText(ImVec2(10, 360), IM_COL32(255, 255, 0, 255),
-                "No items detected. Try moving closer to supply bundles!");
-        }
     }
 }
-
 // ===== COMMAND QUEUE HOOK =====
 typedef void(__stdcall* ExecuteCommandLists)(ID3D12CommandQueue*, UINT, ID3D12CommandList* const*);
 ExecuteCommandLists oExecuteCommandLists = nullptr;
@@ -571,6 +409,9 @@ void** GetVTable(void* obj) {
 }
 
 HRESULT __stdcall hkPresent(IDXGISwapChain3* pSwapChain, UINT SyncInterval, UINT Flags) {
+    // [FIX] Eject safety check
+    if (g_Unload) return oPresent(pSwapChain, SyncInterval, Flags);
+
     if (!g_Initialized) {
         if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D12Device), (void**)&g_pd3dDevice))) {
             DXGI_SWAP_CHAIN_DESC sd;
@@ -692,13 +533,16 @@ DWORD WINAPI MainThread(LPVOID param) {
     printf("========================================\n");
     printf("  Ghost of Tsushima - SCAN-BASED ESP\n");
     printf("========================================\n");
+    printf("  [INFO] Press INSERT for Menu\n");
+    printf("  [INFO] Press END to Eject DLL\n");
 
     if (MH_Initialize() != MH_OK) {
         printf("[GoTCheat] MinHook init failed!\n");
         return 1;
     }
 
-    Sleep(5000);
+    // Wait a moment for game to be ready
+    Sleep(2000);
 
     printf("[GoTCheat] Creating dummy device...\n");
 
@@ -737,9 +581,6 @@ DWORD WINAPI MainThread(LPVOID param) {
     void* pPresentAddr = pSwapChainVTable[8];
     void* pExecuteCommandListsAddr = pCommandQueueVTable[10];
 
-    printf("[GoTCheat] Present: 0x%p\n", pPresentAddr);
-    printf("[GoTCheat] ExecuteCommandLists: 0x%p\n", pExecuteCommandListsAddr);
-
     MH_CreateHook(pPresentAddr, &hkPresent, reinterpret_cast<LPVOID*>(&oPresent));
     MH_EnableHook(pPresentAddr);
 
@@ -747,9 +588,6 @@ DWORD WINAPI MainThread(LPVOID param) {
     MH_EnableHook(pExecuteCommandListsAddr);
 
     printf("[GoTCheat] ===== HOOKS ENABLED! =====\n");
-    printf("[GoTCheat] Using scan-based item detection\n");
-    printf("[GoTCheat] Array base: GhostOfTsushima.exe+1EBD440\n");
-    printf("[GoTCheat] Press INSERT in-game to toggle menu\n");
 
     pSwapChain->Release();
     pCommandQueue->Release();
@@ -758,7 +596,46 @@ DWORD WINAPI MainThread(LPVOID param) {
     pFactory->Release();
     DestroyWindow(dummyWindow);
 
-    while (true) Sleep(1000);
+    // ==========================================
+    // EJECT LOOP (Waits for END key)
+    // ==========================================
+    while (true) {
+        if (GetAsyncKeyState(VK_END) & 0x8000) {
+            printf("\n[GoTCheat] Eject requested...\n");
+            break;
+        }
+        Sleep(100);
+    }
+
+    // ==========================================
+    // CLEANUP & UNLOAD
+    // ==========================================
+
+    // 1. Signal the hook to STOP doing anything immediately
+    g_Unload = true;
+
+    // 2. Wait for the GPU to finish the last frame (CRITICAL for DX12)
+    Sleep(300);
+
+    // 3. Restore Window Procedure
+    if (oWndProc && g_hWnd) {
+        SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
+    }
+
+    // 4. Disable Hooks
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
+
+    // 5. Shutdown ImGui (Now safe because GPU is done)
+    if (g_Initialized) {
+        ImGui_ImplDX12_Shutdown();
+        ImGui_ImplWin32_Shutdown();
+        ImGui::DestroyContext();
+    }
+
+    if (f) fclose(f);
+    FreeConsole();
+    FreeLibraryAndExitThread((HMODULE)param, 0);
     return 0;
 }
 
@@ -766,16 +643,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
-    }
-    else if (reason == DLL_PROCESS_DETACH) {
-        MH_DisableHook(MH_ALL_HOOKS);
-        MH_Uninitialize();
-        if (oWndProc) SetWindowLongPtr(g_hWnd, GWLP_WNDPROC, (LONG_PTR)oWndProc);
-        if (g_Initialized) {
-            ImGui_ImplDX12_Shutdown();
-            ImGui_ImplWin32_Shutdown();
-            ImGui::DestroyContext();
-        }
     }
     return TRUE;
 }
